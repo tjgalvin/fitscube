@@ -666,6 +666,29 @@ async def process_channel(
     del plane
 
 
+def check_for_any_beam(file_list: list[Path]) -> bool:
+    """Check to see if any input files have a beam encoded in the header
+
+    Args:
+        file_list (list[Path]): The collection of files to examine
+
+    Returns:
+        bool: Whether beam properties were found in any of the files
+    """
+    # This is the same as a any(), but breaks avoids reading un-necessary headers
+    # TODO: Should we ever do a test for consistent WCSs up front this should be
+    # moved over to that check
+    for file in file_list:
+        logger.debug(f"Examining {file=} for beam properties")
+        file_header = fits.getheader(file)
+        if "BMAJ" in file_header:
+            return True
+
+    # No beams were found among any of the inputers, so no beam information
+    # can be recorded in the output
+    return False
+
+
 async def combine_fits_coro(
     file_list: list[Path],
     out_cube: Path,
@@ -704,7 +727,7 @@ async def combine_fits_coro(
         create_blanks=create_blanks,
         time_domain_mode=time_domain_mode,
     )
-    has_beams = "BMAJ" in fits.getheader(file_list[0])
+    has_beams = check_for_any_beam(file_list=file_list)
     if has_beams:
         msg = f"Found beam in {file_list[0]} - assuming all files have beams"
         logger.info(msg)
