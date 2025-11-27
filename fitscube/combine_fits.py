@@ -363,7 +363,8 @@ async def create_output_cube_coro(
         new_header["COMMENT"] = (
             f"The value '{tiny}' repsenents a NaN PSF in the beamtable."
         )
-        del new_header["BMAJ"], new_header["BMIN"], new_header["BPA"]
+        for k in ("BMAJ", "BMIN", "BPA"):
+            new_header.pop(k, None)
 
     if bounding_box:
         logger.info("Updating CRPIX1 and CRPIX2 header values to reflect bounding box")
