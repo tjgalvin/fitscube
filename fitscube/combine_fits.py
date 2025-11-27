@@ -643,11 +643,14 @@ def load_and_preprocess_fits_data(
             bounding_box.xmin : bounding_box.xmax,
             bounding_box.ymin : bounding_box.ymax,
         ]
+
+    # Bail out early if we need to replace with nans
+    if wipe_with_nan:
+        plane *= np.nan
+        return plane
+
     if invalidate_zeros:
         plane[plane == 0.0] = np.nan
-
-    if wipe_with_nan:
-        plane += np.nan
 
     return plane
 
