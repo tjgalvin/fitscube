@@ -628,6 +628,30 @@ def make_beam_table(beams: Beams, old_header: fits.Header) -> fits.BinTableHDU:
     return tab_hdu
 
 
+def load_and_preprocess_fits_data(
+    file_path: Path,
+    bounding_box: BoundingBox | None = None,
+    invalidate_zeros: bool = False,
+    wipe_with_nan: bool = False,
+) -> ArrayLike:
+    # Use memmap=False to force the data to be read into memory - gives a speedup
+    plane = fits.getdata(filename=file_path, memmap=False)
+
+    if bounding_box is not None:
+        plane = plane[
+            ...,
+            bounding_box.xmin : bounding_box.xmax,
+            bounding_box.ymin : bounding_box.ymax,
+        ]
+    if invalidate_zeros:
+        plane[plane == 0.0] = np.nan
+
+    if wipe_with_nan:
+        plane += np.nan
+
+    return plane
+
+
 async def process_channel(
     file_handle: BufferedRandom,
     new_header: fits.Header,
@@ -640,23 +664,14 @@ async def process_channel(
 ) -> None:
     msg = f"Processing channel {new_channel}"
     logger.info(msg)
-    # Use memmap=False to force the data to be read into memory - gives a speedup
-    if is_missing:
-        plane = await asyncio.to_thread(fits.getdata, file_list[0], memamp=False)
-        plane *= np.nan
-    else:
-        plane = await asyncio.to_thread(
-            fits.getdata, file_list[old_channel], memmap=False
-        )
-
-    if bounding_box is not None:
-        plane = plane[
-            ...,
-            bounding_box.xmin : bounding_box.xmax,
-            bounding_box.ymin : bounding_box.ymax,
-        ]
-    if invalidate_zeros:
-        plane[plane == 0.0] = np.nan
+    file_to_load = file_list[0] if is_missing else file_list[old_channel]
+    plane = await asyncio.to_thread(
+        load_and_preprocess_fits_data,
+        file_to_load,
+        bounding_box=bounding_box,
+        invalidate_zeros=invalidate_zeros,
+        wipe_with_nan=is_missing,
+    )
 
     await write_channel_to_cube_coro(
         file_handle=file_handle,
