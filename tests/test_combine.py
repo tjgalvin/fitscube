@@ -14,3 +14,8 @@ def test_check_for_any_beams_no_beams(file_list) -> None:
 def test_check_for_any_beam_real_images(time_image_paths) -> None:
     """See if beam is in any of these images"""
     assert check_for_any_beam(file_list=time_image_paths)
+
+
+def test_check_for_any_beam_one_beam(file_list_onebeam) -> None:
+    """See if beam is in any of these images. Only one of the files should have the beamn properties"""
+    assert check_for_any_beam(file_list=file_list_onebeam)

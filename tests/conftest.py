@@ -109,3 +109,30 @@ def file_list(even_specs: u.Quantity):
 
     for i in range(len(even_specs)):
         Path(f"plane_{i}.fits").unlink()
+
+
+@pytest.fixture
+def file_list_onebeam(even_specs: u.Quantity):
+    """Same as above but one file with have a beam"""
+    image = np.ones((1, 10, 10))
+    for i, spec in enumerate(even_specs):
+        header = fits.Header()
+        header["CRVAL3"] = spec.to(u.s).value
+        header["CDELT3"] = 9.98
+        header["CRPIX3"] = 1
+        header["CTYPE3"] = "TIME"
+        header["CUNIT3"] = "s"
+        header["DATE-OBS"] = Time(spec.to(u.d).value, format="mjd").isot
+        header["MJD-OBS"] = Time(spec.to(u.d).value, format="mjd").mjd
+        if i == 3:
+            header["BMAJ"] = 1
+            header["BMIN"] = 1
+            header["BPA"] = 1
+
+        hdu = fits.PrimaryHDU(image * i, header=header)
+        hdu.writeto(f"plane_{i}.fits", overwrite=True)
+
+    yield [Path(f"plane_{i}.fits") for i in range(len(even_specs))]
+
+    for i in range(len(even_specs)):
+        Path(f"plane_{i}.fits").unlink()
