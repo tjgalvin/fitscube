@@ -16,10 +16,7 @@ import asyncio
 import warnings
 from io import BufferedRandom
 from pathlib import Path
-from typing import (
-    NamedTuple,
-    TypeVar,
-)
+from typing import Literal, NamedTuple, TypeVar
 
 import astropy.units as u
 import numpy as np
@@ -50,6 +47,8 @@ BIT_DICT = {
     16: 2,
     8: 1,
 }
+FLOAT_LENGTH = Literal[16, 32, 64]
+FLOAT_TYPE = {64: ">f8", 32: ">f4"}
 
 warnings.filterwarnings("ignore", category=UserWarning, module="astropy.io.fits")
 warnings.filterwarnings("ignore", category=VerifyWarning)
@@ -133,6 +132,41 @@ def isin_close(
     return np.isclose(element[:, None], test_element, atol, rtol).any(1)
 
 
+def grid_step(diffs: ArrayLike) -> float:
+    """Recover the fundamental channel step from the observed diffs.
+
+    On a regular grid with missing channels every diff is an integer multiple
+    of the channel width, so the gcd of the diffs recovers that width even when
+    no two surviving channels are adjacent -- the case where ``min(diffs)``
+    overestimates the step (e.g. present channels 0, 3, 5 give ``min == 2`` but
+    the true step is 1). Falls back to ``min(diffs)`` if the gcd is numerically
+    unstable or does not divide every diff, so the common case is unchanged (any
+    surviving adjacent pair makes the gcd equal the minimum diff exactly).
+
+    Args:
+        diffs (ArrayLike): Differences between consecutive spec values.
+
+    Returns:
+        float: Estimated regular grid step.
+    """
+    diffs = np.abs(np.asarray(diffs, dtype=np.longdouble))
+    min_diff = np.min(diffs)
+    tol = np.max(diffs) * 1e-6
+
+    g = diffs[0]
+    for d in diffs[1:]:
+        a, b = (g, d) if g >= d else (d, g)
+        # Tolerant Euclid: stop once the remainder is within the noise floor.
+        while b > tol:
+            a, b = b, a % b
+        g = a
+
+    divides_all = np.all(np.abs(np.round(diffs / g) - diffs / g) <= 1e-3)
+    if g <= tol or not divides_all:
+        return float(min_diff)
+    return float(g)
+
+
 def even_spacing(specs: u.Quantity, time_domain_mode: bool = False) -> SpequencyInfo:
     """Make the frequencies or times evenly spaced.
 
@@ -144,9 +178,9 @@ def even_spacing(specs: u.Quantity, time_domain_mode: bool = False) -> Spequency
     """
     specs_arr = specs.value.astype(np.longdouble)
     diffs = np.diff(specs_arr)
-    min_diff: float = np.min(diffs)
-    # Create a new array with the minimum difference
-    new_specs = np_arange_fix(specs_arr[0], specs_arr[-1], min_diff)
+    step = grid_step(diffs)
+    # Create a new array with the fundamental grid step
+    new_specs = np_arange_fix(specs_arr[0], specs_arr[-1], step)
     missing_chan_idx = np.logical_not(
         isin_close(new_specs, specs_arr, time_domain_mode)
     )
@@ -247,19 +281,26 @@ async def create_output_cube_coro(
     overwrite: bool = False,
     time_domain_mode: bool = False,
     bounding_box: BoundingBox | None = None,
+    float_length: FLOAT_LENGTH | None = None,
 ) -> InitResult:
-    """Initialize the data cube.
+    """Generate the output header and write a dummy cube to disk based on properties of the
+    inpute data. The output cube written here has a correctly formed header and a pre-zerod
+    data cube written as output.
 
     Args:
-        old_name (str): Old FITS file name
-        n_chan (int): Number of channels
-
-    Raises:
-        KeyError: If 2D and REFFREQ is not in header
-        ValueError: If not 2D and FREQ is not in header
+        old_name (Path): The path to a representative image to draw the base fits header from
+        out_cube (Path): Path of the output cube to create
+        specs (u.Quantity): Specification of the unit that denotes the 'cube' axis
+        ignore_spec (bool, optional): Whether the provided `specs` axis should be ignored. If True dummy placeholder fields added. Defaults to False.
+        has_beams (bool, optional): Indicates whether a CASA Beam table will also be generated and added to the output cube. Defaults to False.
+        single_beam (bool, optional): Indicates whether a constant restoring beam has been used among all input images. If so only the beam fields are need. Defaults to False.
+        overwrite (bool, optional): If True the out the output cube will overwrite any existing file. Defaults to False.
+        time_domain_mode (bool, optional): Whether to join images via the DATE-OBS (e.g. time) axis. If False cube joined along frequency axis. Defaults to False.
+        bounding_box (BoundingBox | None, optional): Whether a trimming operation should be applied to input images. If a BoundingBox is supplied this will be used to update the reference pixel position and data shape indicators. Defaults to None.
+        float_length (Literal[16, 32, 64] | None, optional): The precision of the output data. If None drawn from input data. Otherwise values accepted are 16, 32 and 64. Defaults to None.
 
     Returns:
-        InitResult: header, spec_idx, spec_fits_idx, is_2d
+        InitResult: Details of the output cube, including the output header
     """
 
     # define units if in time or freq domain
@@ -380,6 +421,23 @@ async def create_output_cube_coro(
         cube_shape.insert(0, n_chan)
     else:
         cube_shape[idx] = n_chan
+
+    logger.critical(f"{float_length=} {new_header['BITPIX']=}")
+    if float_length is not None:
+        # Per astropy docs
+        # bITPIX    numpy data type
+        # 8         numpy.uint8 (note it is UNsigned integer)
+        # 16        numpy.int16
+        # 32        numpy.int32
+        # 64        numpy.int64
+        # -32       numpy.float32
+        # -64       numpy.float64
+        assert float_length in list(BIT_DICT.keys()), (
+            f"{float_length=} not in {BIT_DICT=}"
+        )
+        bit_pix = int(float_length)
+        logger.info(f"Specified {float_length=}, corresponding to {bit_pix=}")
+        new_header["BITPIX"] = -abs(bit_pix)
 
     output_header = await create_cube_from_scratch_coro(
         output_file=out_cube, output_header=new_header, overwrite=overwrite
@@ -676,6 +734,11 @@ async def process_channel(
         wipe_with_nan=is_missing,
     )
 
+    if "BITPIX" in new_header:
+        bit_pix = abs(new_header["BITPIX"])
+        float_type = FLOAT_TYPE[bit_pix]
+        plane = plane.astype(float_type)
+
     await write_channel_to_cube_coro(
         file_handle=file_handle,
         plane=plane,
@@ -720,6 +783,7 @@ async def combine_fits_coro(
     time_domain_mode: bool = False,
     bounding_box: bool = False,
     invalidate_zeros: bool = False,
+    float_length: FLOAT_LENGTH | None = None,
 ) -> u.Quantity:
     """Combine FITS files into a cube.
     Can handle either frequency or time dimensions agnostically
@@ -732,6 +796,7 @@ async def combine_fits_coro(
         time_domain_mode (bool, optional): Work in time domain mode - make a time-cube. Default = False.
         bounding_box (bool, optional): Clip invalid/padded pixels when crafting the fits cube. When True an extra read of the input daata is needed, but output cube is smaller. Defaults to False.
         invalidate_zeros (bool, optionals): Set pixels whose values are exactly zero to NaNs. Defaults to False.
+        float_length (Literal[16, 32, 64] | None, optional): The floating point precision in bits to use when creating the output cube. If None the size of the input data are used. Defaults to None.
 
     Returns:
         tuple[fits.HDUList, u.Quantity]: The combined FITS cube and frequencies
@@ -802,6 +867,7 @@ async def combine_fits_coro(
         overwrite=overwrite,
         time_domain_mode=time_domain_mode,
         bounding_box=final_bounding_box,
+        float_length=float_length,
     )
 
     new_channels = np.arange(len(specs))
@@ -923,6 +989,13 @@ def get_parser(
         action="store_true",
         help="Set pixels whose values are exactly zero to NaNs",
     )
+    parser.add_argument(
+        "--floating",
+        type=int,
+        choices=(8, 16, 32, 64),
+        default=None,
+        help="The number of floating point bits to use in the out cube. If None the input data precision is used.",
+    )
 
     return parser
 
@@ -965,6 +1038,7 @@ def cli(args: argparse.Namespace | None = None) -> None:
         time_domain_mode=time_domain_mode,
         bounding_box=args.bounding_box,
         invalidate_zeros=args.invalidate_zeros,
+        float_length=args.floating,
     )
 
     spequency = "times" if time_domain_mode else "frequencies"

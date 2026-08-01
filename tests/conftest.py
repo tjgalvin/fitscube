@@ -72,6 +72,34 @@ def time_image_paths(tmpdir) -> list[Path]:
 
 
 @pytest.fixture
+def time_image_paths_withzeroborder(tmpdir) -> list[Path]:
+    """Same as above but zero out border pixels in the data"""
+    tmp_dir = Path(tmpdir) / "time_images"
+    tmp_dir.mkdir(exist_ok=True, parents=True)
+    images_zip = Path(__file__).parent / "data" / "time_images.zip"
+
+    unpack_archive(images_zip, tmp_dir)
+    image_paths = list(tmp_dir.glob("*fits"))
+    image_paths.sort()
+
+    output_paths = []
+    for image in image_paths:
+        with fits.open(image, memmap=False, lazy_load_hdus=False) as a:
+            data = a[0].data
+            data[..., :5, :] = 0
+            data[..., -5:, :] = 0
+            data[..., :, :5] = 0
+            data[..., :, -5:] = 0
+
+            a[0].data = data
+            image_output = image.with_suffix(".zero.fits")
+            fits.writeto(image_output, data=data, header=a[0].header)
+            output_paths.append(image_output)
+
+    return output_paths
+
+
+@pytest.fixture
 def even_specs() -> u.Quantity:
     rng = np.random.default_rng()
     # mjd 60000 to 60000.2
