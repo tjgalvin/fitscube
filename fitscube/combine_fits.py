@@ -16,7 +16,7 @@ import asyncio
 import warnings
 from io import BufferedRandom
 from pathlib import Path
-from typing import Literal, NamedTuple, TypeVar
+from typing import Any, Literal, NamedTuple, TypeVar
 
 import astropy.units as u
 import numpy as np
@@ -25,7 +25,7 @@ from astropy.io.fits.verify import VerifyWarning
 from astropy.table import Table
 from astropy.time import Time
 from astropy.wcs import WCS
-from numpy.typing import ArrayLike
+from numpy.typing import ArrayLike, NDArray
 from radio_beam import Beam, Beams
 from radio_beam.beam import NoBeamException
 from tqdm.asyncio import tqdm
@@ -73,7 +73,7 @@ class SpequencyInfo(NamedTuple):
 
     specs: u.Quantity
     """Frequencies/Times"""
-    missing_chan_idx: ArrayLike
+    missing_chan_idx: NDArray[np.bool_]
     """Missing channel indices"""
 
 
@@ -84,12 +84,15 @@ class FileSpequencyInfo(NamedTuple):
     """Frequencies or times matching each file"""
     specs: u.Quantity
     """Frequency/time in Hz or s"""
-    missing_chan_idx: ArrayLike
+    missing_chan_idx: NDArray[np.bool_]
     """Missing channel/time indices"""
 
 
 async def write_channel_to_cube_coro(
-    file_handle: BufferedRandom, plane: ArrayLike, chan: int, header: fits.Header
+    file_handle: BufferedRandom,
+    plane: NDArray[np.floating[Any]],
+    chan: int,
+    header: fits.Header,
 ) -> None:
     msg = f"Writing channel {chan} to cube"
     logger.info(msg)
@@ -102,7 +105,7 @@ write_channel_to_cube = sync_wrapper(write_channel_to_cube_coro)
 
 
 # https://stackoverflow.com/a/66082278
-def np_arange_fix(start: float, stop: float, step: float) -> ArrayLike:
+def np_arange_fix(start: float, stop: float, step: float) -> NDArray[np.float64]:
     n = (stop - start) / step + 1
     x = n - int(n)
     stop += step * max(0.1, x) if x < 0.5 else 0
@@ -110,16 +113,18 @@ def np_arange_fix(start: float, stop: float, step: float) -> ArrayLike:
 
 
 def isin_close(
-    element: ArrayLike, test_element: ArrayLike, time_domain_mode: bool = False
-) -> ArrayLike:
+    element: NDArray[np.floating[Any]],
+    test_element: ArrayLike,
+    time_domain_mode: bool = False,
+) -> NDArray[np.bool_]:
     """Check if element is in test_element, within a tolerance.
 
     Args:
-        element (ArrayLike): Element to check
+        element (NDArray[np.floating[Any]]): Element to check
         test_element (ArrayLike): Element to check against
 
     Returns:
-        ArrayLike: Boolean array
+        NDArray[np.bool_]: Boolean array
     """
     if time_domain_mode:
         # the following should be sufficient to test integration times to ~5ms accuracy
@@ -691,9 +696,9 @@ def load_and_preprocess_fits_data(
     bounding_box: BoundingBox | None = None,
     invalidate_zeros: bool = False,
     wipe_with_nan: bool = False,
-) -> ArrayLike:
+) -> NDArray[np.floating[Any]]:
     # Use memmap=False to force the data to be read into memory - gives a speedup
-    plane = fits.getdata(filename=file_path, memmap=False)
+    plane: NDArray[np.floating[Any]] = fits.getdata(filename=file_path, memmap=False)
 
     if bounding_box is not None:
         plane = plane[
@@ -757,16 +762,17 @@ def check_for_any_beam(file_list: list[Path]) -> bool:
     Returns:
         bool: Whether beam properties were found in any of the files
     """
-    # This is the same as a any(), but breaks avoids reading un-necessary headers
+    # This is the same as any(), but avoids reading un-necessary headers
     # TODO: Should we ever do a test for consistent WCSs up front this should be
     # moved over to that check
     for file in file_list:
         logger.debug(f"Examining {file=} for beam properties")
         file_header = fits.getheader(file)
         if "BMAJ" in file_header:
+            logger.info(f"Found beam properties in {file}")
             return True
 
-    # No beams were found among any of the inputers, so no beam information
+    # No beams were found among any of the inputs, so no beam information
     # can be recorded in the output
     return False
 
@@ -813,8 +819,6 @@ async def combine_fits_coro(
     )
     has_beams = check_for_any_beam(file_list=file_list)
     if has_beams:
-        msg = f"Found beam in {file_list[0]} - assuming all files have beams"
-        logger.info(msg)
         beams = parse_beams(file_list)
         for beam in beams:
             logger.info(f"{beams[0]==beam=}")
@@ -826,7 +830,7 @@ async def combine_fits_coro(
             & np.isclose(beams[0].minor, beams.minor)
             & np.isclose(beams[0].pa, beams.pa)
         )
-        single_beam = np.all(same_beam)
+        single_beam = bool(np.all(same_beam))
 
         if single_beam:
             logger.info("All beams are the same")
@@ -877,7 +881,7 @@ async def combine_fits_coro(
 
     coros = []
     with out_cube.open("rb+") as file_handle:
-        for new_channel in new_channels:
+        for new_channel in range(len(new_channels)):
             is_missing = missing_chan_idx[new_channel]
             msg = f"Channel {new_channel} missing == {is_missing}"
             logger.info(msg)
